@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Gemini Voice Chat</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 50px auto;
+        padding: 20px;
+        background: #f5f5f5;
+      }
+      .container {
+        background: white;
+        padding: 30px;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      }
+      h2 {
+        color: #333;
+        margin-top: 0;
+      }
+      .controls {
+        margin: 20px 0;
+      }
+      button {
+        padding: 10px 20px;
+        margin: 5px;
+        font-size: 16px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: background 0.3s;
+      }
+      #connect {
+        background: #4caf50;
+        color: white;
+      }
+      #connect:hover {
+        background: #45a049;
+      }
+      #start {
+        background: #2196f3;
+        color: white;
+      }
+      #start:hover:not(:disabled) {
+        background: #0b7dda;
+      }
+      #stop,
+      #turnComplete {
+        background: #f44336;
+        color: white;
+      }
+      #stop:hover:not(:disabled),
+      #turnComplete:hover:not(:disabled) {
+        background: #da190b;
+      }
+      button:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+      }
+      .input-group {
+        margin: 15px 0;
+      }
+      input[type="text"] {
+        width: 100%;
+        padding: 8px;
+        font-size: 14px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+      }
+      #log {
+        height: 300px;
+        overflow: auto;
+        background: #1e1e1e;
+        color: #00ff00;
+        padding: 12px;
+        border-radius: 5px;
+        font-family: "Courier New", monospace;
+        font-size: 13px;
+        margin-top: 20px;
+      }
+      .status {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        margin-right: 8px;
+      }
+      .status.connected {
+        background: #4caf50;
+      }
+      .status.disconnected {
+        background: #f44336;
+      }
+      .status-text {
+        margin: 10px 0;
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h2>🎙️ Gemini Voice Chat Tester</h2>
+
+      <div class="status-text">
+        <span class="status disconnected" id="statusDot"></span>
+        <span id="statusText">Disconnected</span>
+      </div>
+
+      <div class="input-group">
+        <label>WebSocket URL:</label>
+        <input id="wsurl" type="text" value="ws://127.0.0.1:8000/ws/audio" />
+      </div>
+
+      <div class="controls">
+        <button id="connect">Connect</button>
+        <button id="start" disabled>🎤 Start Conversation</button>
+        <button id="stop" disabled>🛑 Stop</button>
+      </div>
+
+      <p style="color: #666; font-size: 14px; margin-top: 10px">
+        💡 <strong>Tip:</strong> Gemini uses automatic turn detection. Just
+        speak naturally and pause when done - Gemini will respond automatically!
+      </p>
+
+      <pre id="log"></pre>
+    </div>
+
+    <script>
+      let ws, audioCtx, mediaStream, processor, playbackCtx;
+      let isSpeaking = false;
+      let audioQueue = [];
+      let isPlaying = false;
+      let nextStartTime = 0;
+
+      function log(m) {
+        const el = document.getElementById("log");
+        const timestamp = new Date().toLocaleTimeString();
+        el.textContent += `[${timestamp}] ${m}\n`;
+        el.scrollTop = el.scrollHeight;
+      }
+
+      function updateStatus(connected) {
+        const dot = document.getElementById("statusDot");
+        const text = document.getElementById("statusText");
+        if (connected) {
+          dot.className = "status connected";
+          text.textContent = "Connected";
+        } else {
+          dot.className = "status disconnected";
+          text.textContent = "Disconnected";
+        }
+      }
+
+      // Downsample Float32 to 16k for better quality, mono, then to Int16 PCM
+      function downsampleTo16k(float32Array, inRate) {
+        const outRate = 16000;
+        const ratio = inRate / outRate;
+        const len = Math.floor(float32Array.length / ratio);
+        const result = new Int16Array(len);
+        for (let i = 0; i < len; i++) {
+          const idx = Math.floor(i * ratio);
+          const s = Math.max(-1, Math.min(1, float32Array[idx]));
+          result[i] = s < 0 ? s * 32768 : s * 32767;
+        }
+        return result;
+      }
+
+      function pcm16ToBase64(pcm16Array) {
+        const buffer = new ArrayBuffer(pcm16Array.length * 2);
+        const view = new DataView(buffer);
+        for (let i = 0; i < pcm16Array.length; i++) {
+          view.setInt16(i * 2, pcm16Array[i], true);
+        }
+        const uint8 = new Uint8Array(buffer);
+        let binary = "";
+        for (let i = 0; i < uint8.length; i++) {
+          binary += String.fromCharCode(uint8[i]);
+        }
+        return btoa(binary);
+      }
+
+      function playAudio(pcmBase64, sampleRate) {
+        // Add to queue instead of playing immediately
+        audioQueue.push({ pcmBase64, sampleRate });
+        if (!isPlaying) {
+          processAudioQueue();
+        }
+      }
+
+      function processAudioQueue() {
+        if (audioQueue.length === 0) {
+          isPlaying = false;
+          return;
+        }
+
+        isPlaying = true;
+        const { pcmBase64, sampleRate } = audioQueue.shift();
+
+        try {
+          // Decode base64 to PCM16-LE
+          const binary = atob(pcmBase64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+
+          // Convert to Int16Array
+          const pcm16 = new Int16Array(bytes.buffer);
+
+          // Convert to Float32 for Web Audio API
+          const float32 = new Float32Array(pcm16.length);
+          for (let i = 0; i < pcm16.length; i++) {
+            float32[i] = pcm16[i] / 32768.0;
+          }
+
+          // Create audio context if needed
+          if (!playbackCtx) {
+            playbackCtx = new (window.AudioContext ||
+              window.webkitAudioContext)();
+            log(
+              `🔊 Created AudioContext with rate: ${playbackCtx.sampleRate}Hz`
+            );
+            nextStartTime = playbackCtx.currentTime;
+          }
+
+          // Create audio buffer
+          const audioBuffer = playbackCtx.createBuffer(
+            1,
+            float32.length,
+            sampleRate
+          );
+          audioBuffer.getChannelData(0).set(float32);
+
+          // Create source and schedule playback
+          const source = playbackCtx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(playbackCtx.destination);
+
+          // Schedule this chunk to play right after the previous one
+          const startTime = Math.max(nextStartTime, playbackCtx.currentTime);
+          source.start(startTime);
+          nextStartTime = startTime + audioBuffer.duration;
+
+          // Quiet mode - uncomment to see playback details
+          // log(`▶️ Playing ${audioBuffer.duration.toFixed(2)}s, queue: ${audioQueue.length}`);
+
+          // When this chunk ends, play the next one
+          source.onended = () => {
+            processAudioQueue();
+          };
+        } catch (e) {
+          log("⚠️ Error playing audio: " + e.message);
+          console.error("Audio playback error:", e);
+          isPlaying = false;
+          processAudioQueue(); // Try next chunk
+        }
+      }
+
+      document.getElementById("connect").onclick = () => {
+        const url = document.getElementById("wsurl").value;
+        ws = new WebSocket(url);
+
+        ws.onopen = () => {
+          log("✅ WebSocket connected");
+          updateStatus(true);
+          document.getElementById("start").disabled = false;
+        };
+
+        ws.onclose = () => {
+          log("❌ WebSocket closed");
+          updateStatus(false);
+          document.getElementById("start").disabled = true;
+          document.getElementById("stop").disabled = true;
+        };
+
+        ws.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+            if (data.event === "media" && data.media && data.media.payload) {
+              playAudio(data.media.payload, 16000); // Higher quality 16kHz
+            }
+          } catch (e) {
+            log("⚠️ Error: " + e.message);
+          }
+        };
+
+        ws.onerror = (err) => {
+          log("⚠️ WebSocket error: " + err);
+        };
+      };
+
+      document.getElementById("start").onclick = async () => {
+        try {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: 48000,
+          });
+
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+
+          const src = audioCtx.createMediaStreamSource(mediaStream);
+          processor = audioCtx.createScriptProcessor(4096, 1, 1);
+          src.connect(processor);
+          processor.connect(audioCtx.destination);
+
+          processor.onaudioprocess = (e) => {
+            if (!isSpeaking) return;
+
+            const inBuf = e.inputBuffer.getChannelData(0);
+            const pcm16_16k = downsampleTo16k(inBuf, audioCtx.sampleRate);
+
+            // Send in 20ms chunks (320 samples @ 16kHz)
+            const chunk = 320;
+            for (let i = 0; i + chunk <= pcm16_16k.length; i += chunk) {
+              const slice = pcm16_16k.subarray(i, i + chunk);
+              const b64 = pcm16ToBase64(slice);
+              const msg = JSON.stringify({
+                event: "media",
+                media: { payload: b64 },
+              });
+              ws.send(msg);
+            }
+          };
+
+          isSpeaking = true;
+          document.getElementById("start").disabled = true;
+          document.getElementById("stop").disabled = false;
+          log(
+            "🎤 Microphone active - speak naturally, Gemini will auto-detect when you're done!"
+          );
+        } catch (err) {
+          log("❌ Error accessing microphone: " + err.message);
+        }
+      };
+
+      document.getElementById("stop").onclick = () => {
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ event: "stop" }));
+        }
+
+        isSpeaking = false;
+        if (processor) processor.disconnect();
+        if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
+        if (audioCtx) audioCtx.close();
+
+        // Clear audio queue
+        audioQueue = [];
+        isPlaying = false;
+        nextStartTime = 0;
+
+        document.getElementById("start").disabled = false;
+        document.getElementById("stop").disabled = true;
+        log("🛑 Stopped");
+      };
+    </script>
+  </body>
+</html>
