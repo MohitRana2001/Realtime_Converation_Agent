@@ -195,14 +195,10 @@ class GeminiBridge:
             self.running = False
 
     async def forward_gemini_to_exotel(self):
-        """Receive Gemini audio (24kHz) and stream to client (8kHz)."""
+        """Receive Gemini audio (24kHz) and stream to client (16kHz) with minimal latency."""
         try:
             logging.info("👂 Listening for Gemini responses...")
-            bytes_per_sec = self.exotel_rate * 2
-            frame20 = int(bytes_per_sec * 0.020)
-            min_flush = int(bytes_per_sec * 0.100)
-            buffer = bytearray()
-
+            
             while self.running:
                 try:
                     async for response in self.session.receive():
@@ -212,8 +208,15 @@ class GeminiBridge:
                         
                         model_turn = server_content.model_turn
                         turn_complete = server_content.turn_complete
+                        interrupted = server_content.interrupted
                         output_transcription = server_content.output_transcription
                         audio_bytes = None
+                        
+                        # Handle interruption - stop playing immediately
+                        if interrupted:
+                            logging.info("🚫 Interrupted - user started speaking")
+                            await self.exotel_ws.send_text(json.dumps({"event": "interrupt"}))
+                            continue
                         
                         if model_turn:
                             for part in model_turn.parts:
@@ -234,27 +237,17 @@ class GeminiBridge:
                         if not audio_bytes:
                             continue
 
-                        # Gemini outputs 24kHz, resample to client rate (16kHz for better quality)
+                        # ZERO-LATENCY: Stream immediately without buffering
+                        # Gemini outputs 24kHz, resample to client rate (16kHz)
                         pcm_client, self._to_client_state = resample_pcm16(
                             audio_bytes, 24000, self.exotel_rate, self._to_client_state
                         )
-
-                        buffer.extend(pcm_client)
-                        while len(buffer) >= min_flush:
-                            flush_size = (len(buffer) // frame20) * frame20
-                            if flush_size < min_flush:
-                                break
-                            chunk = buffer[:flush_size]
-                            del buffer[:flush_size]
-                            payload = base64.b64encode(chunk).decode("ascii")
-                            await self._send_exotel_media(payload)
+                        
+                        # Send immediately without buffer
+                        payload = base64.b64encode(pcm_client).decode("ascii")
+                        await self._send_exotel_media(payload)
 
                         await asyncio.sleep(0)
-
-                    if buffer:
-                        payload = base64.b64encode(buffer).decode("ascii")
-                        await self._send_exotel_media(payload)
-                        buffer.clear()
                 
                 except Exception as e:
                     logging.error(f"❌ Error receiving from Gemini: {e}", exc_info=True)

@@ -1,6 +1,6 @@
 # Gemini Live Audio Test Application
 
-Real-time voice conversation application using Google's Gemini 2.5 Flash Native Audio API.
+Real-time voice conversation application using Google's Gemini 2.5 Flash Native Audio API with interrupt/barge-in capabilities and ultra-low latency streaming.
 
 ## Prerequisites
 
@@ -48,10 +48,10 @@ Real-time voice conversation application using Google's Gemini 2.5 Flash Native 
    Open `exotel_client.html` in your browser (Chrome/Edge recommended)
 
 3. **Start conversation**
-   - Click "Connect" to connect to the server
-   - Click "Start Conversation" to begin
+   - Click "🎙️ Start Conversation" - this automatically connects and starts listening
    - Speak naturally - Gemini uses automatic turn detection
-   - Listen to AI responses through your speakers
+   - **You can interrupt the AI** - just start speaking anytime to stop current response
+   - Click "🛑 Stop Conversation" to end the session
 
 ## How It Works
 
@@ -61,11 +61,19 @@ Browser (Mic) → WebSocket → FastAPI Server → Gemini Live API
 Browser (Speaker) ← WebSocket ← FastAPI Server ← Audio Response
 ```
 
-**Audio Pipeline:**
+**Audio Pipeline (Optimized for Low Latency):**
 
-- Client: 48kHz → 8kHz PCM16-LE
-- Server: 8kHz → 16kHz (to Gemini)
-- Gemini: 24kHz → 8kHz (to client)
+- Client: 48kHz → 16kHz PCM16-LE
+- Server: Real-time streaming to Gemini (16kHz)
+- Gemini: 24kHz → 16kHz (to client) - **zero-buffer streaming**
+
+## Features
+
+✅ **Ultra-Low Latency** - Zero-buffer streaming for immediate audio response  
+✅ **Interrupt/Barge-in** - Speak anytime to interrupt the AI  
+✅ **Auto Turn Detection** - No need to press buttons while speaking  
+✅ **Voice Activity Detection** - Tunable VAD settings for natural conversations  
+✅ **High Quality Audio** - 16kHz streaming for clear voice
 
 ## Configuration
 
@@ -81,6 +89,8 @@ voice_name = "Zephyr"  # or "Kore", "Puck", "Charon", "Aoede"
 # Change language
 language_code = "en-US"  # or "hi-IN", "es-ES", etc.
 ```
+
+**Note:** Interrupt/barge-in capability is built into the Gemini 2.5 Flash Native Audio model by default. The model automatically detects when a user starts speaking and interrupts its own response.
 
 ## Troubleshooting
 

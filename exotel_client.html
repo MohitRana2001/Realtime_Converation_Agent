@@ -115,14 +115,14 @@
       </div>
 
       <div class="controls">
-        <button id="connect">Connect</button>
-        <button id="start" disabled>🎤 Start Conversation</button>
-        <button id="stop" disabled>🛑 Stop</button>
+        <button id="connect">🎙️ Start Conversation</button>
+        <button id="stop" disabled>🛑 Stop Conversation</button>
       </div>
 
       <p style="color: #666; font-size: 14px; margin-top: 10px">
-        💡 <strong>Tip:</strong> Gemini uses automatic turn detection. Just
-        speak naturally and pause when done - Gemini will respond automatically!
+        💡 <strong>Tip:</strong> Once connected, speak naturally. Gemini will
+        automatically detect when you're done and respond. You can interrupt
+        Gemini anytime by speaking!
       </p>
 
       <pre id="log"></pre>
@@ -259,20 +259,30 @@
         }
       }
 
-      document.getElementById("connect").onclick = () => {
+      document.getElementById("connect").onclick = async () => {
         const url = document.getElementById("wsurl").value;
         ws = new WebSocket(url);
 
-        ws.onopen = () => {
+        ws.onopen = async () => {
           log("✅ WebSocket connected");
           updateStatus(true);
-          document.getElementById("start").disabled = false;
+
+          // Auto-start conversation immediately
+          try {
+            await startMicrophone();
+            document.getElementById("connect").disabled = true;
+            document.getElementById("stop").disabled = false;
+            log("🎤 Conversation started - speak naturally!");
+          } catch (err) {
+            log("❌ Error accessing microphone: " + err.message);
+          }
         };
 
         ws.onclose = () => {
           log("❌ WebSocket closed");
           updateStatus(false);
-          document.getElementById("start").disabled = true;
+          stopMicrophone();
+          document.getElementById("connect").disabled = false;
           document.getElementById("stop").disabled = true;
         };
 
@@ -280,7 +290,12 @@
           try {
             const data = JSON.parse(ev.data);
             if (data.event === "media" && data.media && data.media.payload) {
-              playAudio(data.media.payload, 16000); // Higher quality 16kHz
+              playAudio(data.media.payload, 16000);
+            } else if (data.event === "interrupt") {
+              // Clear audio queue on interrupt
+              log("🚫 Interrupted - clearing playback queue");
+              audioQueue = [];
+              isPlaying = false;
             }
           } catch (e) {
             log("⚠️ Error: " + e.message);
@@ -292,60 +307,47 @@
         };
       };
 
-      document.getElementById("start").onclick = async () => {
-        try {
-          audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-            sampleRate: 48000,
-          });
+      async function startMicrophone() {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: 48000,
+        });
 
-          mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            },
-          });
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
 
-          const src = audioCtx.createMediaStreamSource(mediaStream);
-          processor = audioCtx.createScriptProcessor(4096, 1, 1);
-          src.connect(processor);
-          processor.connect(audioCtx.destination);
+        const src = audioCtx.createMediaStreamSource(mediaStream);
+        processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        src.connect(processor);
+        processor.connect(audioCtx.destination);
 
-          processor.onaudioprocess = (e) => {
-            if (!isSpeaking) return;
+        processor.onaudioprocess = (e) => {
+          if (!isSpeaking) return;
 
-            const inBuf = e.inputBuffer.getChannelData(0);
-            const pcm16_16k = downsampleTo16k(inBuf, audioCtx.sampleRate);
+          const inBuf = e.inputBuffer.getChannelData(0);
+          const pcm16_16k = downsampleTo16k(inBuf, audioCtx.sampleRate);
 
-            // Send in 20ms chunks (320 samples @ 16kHz)
-            const chunk = 320;
-            for (let i = 0; i + chunk <= pcm16_16k.length; i += chunk) {
-              const slice = pcm16_16k.subarray(i, i + chunk);
-              const b64 = pcm16ToBase64(slice);
-              const msg = JSON.stringify({
-                event: "media",
-                media: { payload: b64 },
-              });
-              ws.send(msg);
-            }
-          };
+          // Send in 20ms chunks (320 samples @ 16kHz)
+          const chunk = 320;
+          for (let i = 0; i + chunk <= pcm16_16k.length; i += chunk) {
+            const slice = pcm16_16k.subarray(i, i + chunk);
+            const b64 = pcm16ToBase64(slice);
+            const msg = JSON.stringify({
+              event: "media",
+              media: { payload: b64 },
+            });
+            ws.send(msg);
+          }
+        };
 
-          isSpeaking = true;
-          document.getElementById("start").disabled = true;
-          document.getElementById("stop").disabled = false;
-          log(
-            "🎤 Microphone active - speak naturally, Gemini will auto-detect when you're done!"
-          );
-        } catch (err) {
-          log("❌ Error accessing microphone: " + err.message);
-        }
-      };
+        isSpeaking = true;
+      }
 
-      document.getElementById("stop").onclick = () => {
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ event: "stop" }));
-        }
-
+      function stopMicrophone() {
         isSpeaking = false;
         if (processor) processor.disconnect();
         if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
@@ -355,10 +357,20 @@
         audioQueue = [];
         isPlaying = false;
         nextStartTime = 0;
+      }
 
-        document.getElementById("start").disabled = false;
+      document.getElementById("stop").onclick = () => {
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ event: "stop" }));
+          ws.close();
+        }
+
+        stopMicrophone();
+
+        document.getElementById("connect").disabled = false;
         document.getElementById("stop").disabled = true;
-        log("🛑 Stopped");
+        updateStatus(false);
+        log("🛑 Conversation ended");
       };
     </script>
   </body>
